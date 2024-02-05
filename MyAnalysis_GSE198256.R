@@ -146,3 +146,47 @@ genes_mapped <- getBM(attributes = c('hgnc_symbol', 'entrezgene_id'),
 specific_genes_data <- res_acute_vs_control[rownames(res_acute_vs_control) %in% genes_mapped$entrezgene_id, ]
 print(specific_genes_data)
 print(genes_mapped)
+
+####### ORA with ClusterProfiler #######
+GSE198256_res <- na.omit(GSE198256_res)
+sig_genes <- rownames(GSE198256_res[which(GSE198256_res$padj < 0.05), ])
+sig_genes <- unique(sig_genes)
+nonsig_genes <- unique(rownames(GSE198256_res))
+
+ego <- enrichGO(gene         = sig_genes,
+                universe = nonsig_genes,
+                OrgDb        = org.Hs.eg.db,
+                ont          = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable     = TRUE)
+head(ego)[, 1:7]
+dotplot(ego)
+barplot(ego, 
+        drop = TRUE, 
+        showCategory = 10, 
+        title = "GO Biological Pathways",
+        font.size = 8)
+
+ekg <- enrichKEGG(gene         = sig_genes,
+                  universe = nonsig_genes,
+                  organism     = 'hsa', # For human
+                  pAdjustMethod = "BH",
+                  qvalueCutoff = 0.05)
+
+head(ekg)
+barplot(ekg, showCategory=20)
+
+####### GSEA #######
+GSE198256_res_sig <- GSE198256_res[which(GSE198256_res$padj < 0.05), ]
+geneList <- GSE198256_res_sig$log2FoldChange
+names(geneList) <- rownames(GSE198256_res_sig)
+geneList = sort(geneList, decreasing = TRUE)
+
+gse <- gseGO(geneList = geneList,
+             ont = "BP",
+             OrgDb = org.Hs.eg.db,
+             pvalueCutoff = 0.05,
+             pAdjustMethod = "BH")
+
+dotplot(gse, showCategory = 10)
