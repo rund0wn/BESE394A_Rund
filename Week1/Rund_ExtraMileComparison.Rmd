@@ -1,0 +1,155 @@
+---
+title: "RNA-Seq Data Analysis"
+author: "Rund Tawfiq"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Introduction
+
+This document presents an analysis of RNA-Seq data from the GEO database, focusing on differential gene expression in the context of COVID-19. The analysis includes data preprocessing, gene annotation, quality control, normalization, and differential expression analysis.
+
+## Load libraries
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(R.utils)
+library(DESeq2)
+library(GEOquery)
+library(data.table)
+library(NOISeq)
+library(biomaRt)
+library("pheatmap")
+
+```
+
+## Data and metadata retrieval
+
+Download and load the RNA-Seq count data from the GEO database.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+# Load data
+mydata <- read.table('My_data.tsv', sep = "\t", header = TRUE, row.names = 1)
+# Get metadata
+metadata <- read.table('metadata_mydata.txt', sep = "\t", header = TRUE, row.names = 1)
+Factors <- metadata[,c("infection.ch1")]
+```
+
+## Map genes using biomaRt
+
+```{r}
+# Map gene names using biomaRt
+ensemblIDs <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+genes <- as.character(rownames(mydata))
+attributes <- c("percentage_gene_gc_content", "start_position", "end_position", "chromosome_name", "gene_biotype", "hgnc_symbol")
+annotgene <- getBM(attributes = attributes, 
+                   filters = "hgnc_symbol", 
+                   values = genes, 
+                   mart = ensemblIDs)
+annotgene <- annotgene[annotgene$chromosome_name %in% c(as.character(1:22) ,"X","Y"),] # Only keeping genes in these chromosomes
+annotgene_filt <- annotgene[!duplicated(annotgene$hgnc_symbol),] # Removing duplicates
+annotgene_filt <- annotgene_filt[!is.na(annotgene_filt$hgnc_symbol), ]
+rownames(annotgene_filt) <- as.character(annotgene_filt$hgnc_symbol) # Checking our genes + annotation overlap
+sum(as.character(rownames(annotgene_filt)) %in% rownames(mydata))
+```
+
+## NOISeq exploration
+```{r}
+# Only keeping genes that overlap in both
+mydata_count_filt <- mydata[rownames(mydata) %in% rownames(annotgene_filt),]
+annotgene_ord <- annotgene_filt[rownames(mydata_count_filt),]
+
+# NOISeq
+Factors <- metadata[rownames(metadata) %in% colnames(mydata_count_filt), "infection.ch1", drop = FALSE]
+Factors <- Factors[match(colnames(mydata_count_filt), rownames(Factors)), , drop = FALSE]
+colnames(Factors)[1]<- "Group"
+
+lengthuse <- abs(annotgene_ord$end-annotgene_ord$start)
+names(lengthuse) <- rownames(annotgene_ord)
+gc <- annotgene_ord$percentage_gene_gc_content # GC%
+names(gc) <- rownames(annotgene_ord)
+biotype <-annotgene_ord$gene_biotype
+names(biotype) <- rownames(annotgene_ord)
+
+# Creating the object
+data_NOISEQ <- readData(data = mydata_count_filt,
+                        length=lengthuse,
+                        gc= gc,
+                        biotype= biotype,
+                        chromosome = annotgene_ord[,c("chromosome_name","start_position","end_position")],
+                        factors = Factors) # After fixing
+
+# Check representation of RNA biotypes in your sample compares to their distribution in the genome
+myexplodata <- dat(data_NOISEQ, type = "biodetection")
+explo.plot(myexplodata, plottype = "persample")
+
+# Check sequencing depth and feature distribution
+mysaturation = dat(data_NOISEQ, k = 0, ndepth = 7, type = "saturation")
+explo.plot(mysaturation, toplot = 1, samples = 1:11, yleftlim = NULL, yrightlim = NULL)
+
+# Check GC content bias
+myGCbias = dat(data_NOISEQ, factor = "Group", type = "GCbias")
+explo.plot(myGCbias, samples = NULL, toplot = "global")
+
+# Count depth test
+mycd = dat(data_NOISEQ, type = "cd", norm = FALSE, refColumn = 1)
+explo.plot(mycd,samples = 1:11)
+
+```
+
+Comparing my results obtained from fastq files to directly downloaded count tables from GEO:
+
+1. Sequencing depth variation: my samples (42-55%) vs their samples (60-69%) 
+2. Length bias in gene expression: length bias present in both
+3. GC bias in gene expression: statistically significant in both
+4. Count depth: diagnostic test failed in both, recommending normalization
+
+## Differential gene expression analysis
+```{r}
+# Clean up metadata
+pDataUSE <- pData(data_NOISEQ)
+levels(pDataUSE$Group) <- c("Control", "COVID19")
+pDataUSE[,1] <- as.factor(pDataUSE[,1])
+
+# Create DESeq2 object
+mydata_DESeq2 <- DESeqDataSetFromMatrix(countData = mydata_count_filt,
+                                           colData = pDataUSE,
+                                           design = ~ Group)
+keep <- rowSums(counts(mydata_DESeq2) >= 10) >= 6 # Filter out genes that do not have at least 10 counts in at least 6 samples
+mydata_DESeq2_F <- mydata_DESeq2[keep,]
+
+
+# Run DESeq2
+mydata_DESeq2_F<- DESeq(mydata_DESeq2_F)
+mydata_res <- results(mydata_DESeq2_F)
+
+# Filter DEGs based on criteria
+significant_DEGs <- mydata_res$padj < 0.05 & abs(mydata_res$log2FoldChange) > 1
+num_significant_DEGs <- sum(significant_DEGs, na.rm = TRUE)
+upregulated_genes <- mydata_res$log2FoldChange > 1 & mydata_res$padj < 0.05
+downregulated_genes <- mydata_res$log2FoldChange < -1 & mydata_res$padj < 0.05
+num_upregulated_genes <- sum(upregulated_genes, na.rm = TRUE)
+num_downregulated_genes <- sum(downregulated_genes, na.rm = TRUE)
+
+```
+
+DEGs: (Comparison between my results obtained from fastq files to directly downloaded count tables from GEO)
+
+1. Total significant DEGs: `r num_significant_DEGs` vs 477
+2. Upregulated genes: `r num_upregulated_genes` vs 168
+3. Downregulated genes: `r num_downregulated_genes` vs 309
+
+## Heatmap
+
+Expression of the top 20 DEGs in the dataset
+```{r}
+vsd <- vst(mydata_DESeq2_F, blind=FALSE)
+select <- order(rowMeans(counts(mydata_DESeq2_F,normalized=TRUE)),
+                decreasing=TRUE)[1:11]
+df <- as.data.frame(colData(mydata_DESeq2_F)[,c("Group")])
+colnames(df) <- "Group"
+pheatmap(assay(vsd)[select,], cluster_rows=FALSE, show_rownames=TRUE,
+         cluster_cols=FALSE)
+```
+
